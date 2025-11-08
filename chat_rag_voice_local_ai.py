@@ -20,7 +20,8 @@ EMBEDDING_MODEL, EMBEDDING_DIMS, TOP_K, MAX_SNIPPET_CHARS = "all-MiniLM-L6-v2", 
 
 # ========= Microsoft AI Toolkit Config =========
 AI_TOOLKIT_BASE_URL = "http://127.0.0.1:5272/v1/"
-AI_TOOLKIT_MODEL = "qwen2.5-coder-0.5b-instruct-cuda-gpu:3"
+# AI_TOOLKIT_MODEL = "qwen2.5-coder-0.5b-instruct-cuda-gpu:3"
+AI_TOOLKIT_MODEL = "gpt-oss-20b-cuda-gpu:1"
 AI_TEMPERATURE, AI_MAX_TOKENS = 0.0, 80
 _ai_client = OpenAI(base_url=AI_TOOLKIT_BASE_URL, api_key="unused")
 
@@ -96,36 +97,55 @@ def get_all_facts(conn):
 
 def extract_and_store_facts(conn, text):
     """
-    Dynamically extract self-descriptive user facts without any hardcoded examples,
-    while maintaining clear role separation between AVA (assistant) and USER.
+    Robust fact extraction compatible with gpt-oss-20b-cuda-gpu multi-channel output.
+    Strips analysis chatter and captures only the final factual pairs.
     """
     try:
         prompt = (
-            "You are AVA, an assistant who analyzes what the USER says.\n"
-            "Your task is to extract only factual self-descriptions that the USER provides about themselves.\n"
-            "Do NOT include anything about AVA or external topics.\n"
-            "Return plain key=value pairs for explicit facts only (e.g., age=60, hair_color=brown).\n"
-            "Do not invent facts, and do not assume values not stated.\n\n"
+            "You are AVA, an assistant that extracts factual self-descriptions the USER gives about themselves.\n"
+            "Return them as plain 'key=value' pairs (for example: name=William, hair_color=brown).\n"
+            "If no facts are found, return nothing. Do not include analysis, reasoning, or AVA-related info.\n\n"
             f"USER said: {text.strip()}\n\nFacts:\n"
         )
 
         chat = _ai_client.chat.completions.create(
             model=AI_TOOLKIT_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=60,
+            max_tokens=100,
             temperature=0.0,
         )
 
-        output = chat.choices[0].message.content.strip()
-        for line in output.splitlines():
-            if "=" in line:
-                k, v = line.split("=", 1)
+        raw = chat.choices[0].message.content.strip()
+
+        # --- Clean up multi-channel markup ---
+        # 1. Prefer final channel if present
+        final_match = re.search(r"<\|channel\|>final<\|message\|>(.*?)<\|end\|>", raw, re.DOTALL)
+        if final_match:
+            content = final_match.group(1)
+        else:
+            # 2. Otherwise, take last message block after any <|channel|> markers
+            parts = re.split(r"<\|channel\|>.*?<\|message\|>", raw)
+            content = parts[-1] if len(parts) > 1 else raw
+
+        # 3. Remove leftover <|...|> tags and analysis chatter
+        cleaned = re.sub(r"<\|.*?\|>", "", content)
+        cleaned = re.sub(r"(?i)analysis.*?:", "", cleaned).strip()
+
+        # --- Parse key=value or key: value pairs only ---
+        for line in cleaned.splitlines():
+            if "=" in line or ":" in line:
+                k, v = re.split(r"[:=]", line, 1)
                 k, v = k.strip().lower(), v.strip()
                 if k and v:
                     upsert_fact(conn, k, v)
                     logging.info(f'Fact updated: "{k}" = "{v}"')
+
+        if not cleaned.strip():
+            logging.info("No factual data extracted.")
+
     except Exception as e:
-        logging.warning(f"Fact extraction skipped: {e}")
+        logging.warning(f"Fact extraction skipped due to error: {e}")
+
 
 
 # ========= Prompt builder =========
