@@ -4,5 +4,4 @@ pyttsx3
 sentence-transformers
 sqlite-vec
 torch
-openai
 pyaudio; platform_system=="Windows"
